@@ -18,7 +18,7 @@ const DepthMapView = ({ depthMap }) => {
 
       for (let i = 0; i < height; i++) {
         for (let j = 0; j < width; j++) {
-          const depthValue = depthArray[i][j] * 255;
+          const depthValue = depthArray[i * width + j] * 255;
           const index = (i * width + j) * 4;
           imageData.data[index] = depthValue;
           imageData.data[index + 1] = depthValue;

@@ -1,11 +1,10 @@
 import React from 'react';
 
 const FileUpload = ({ onUpload }) => {
-  const handleFileChange = async (event) => {
+  const handleFileChange = (event) => {
     const file = event.target.files[0];
     if (file) {
-      const imageUrl = URL.createObjectURL(file);
-      onUpload(imageUrl);
+      onUpload(file);
     }
   };
 

@@ -14,14 +14,15 @@ const App = () => {
   const [viewMode, setViewMode] = useState('Original');
   const [imageHistory, setImageHistory] = useState([]);
 
-  const handleImageUpload = async (url) => {
+  const handleImageUpload = async (file) => {
     setIsConverting(true);
-    setImageUrl(url);
     setError(null);
     try {
-      const depthMap = await generateDepthMap(url);
+      const depthMap = await generateDepthMap(file);
+      const imageUrl = URL.createObjectURL(file);
+      setImageUrl(imageUrl);
       setDepthMap(depthMap);
-      setImageHistory((prevHistory) => [...prevHistory, { url, depthMap }]);
+      setImageHistory((prevHistory) => [...prevHistory, { url: imageUrl, depthMap }]);
     } catch (error) {
       console.error("Error in handleImageUpload:", error);
       setError(error.message);

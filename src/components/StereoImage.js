@@ -1,55 +1,154 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import * as PIXI from 'pixi.js';
 
-const StereoImage = ({ imageUrl, depthMap }) => {
+const vertexShaderSrc = `
+  attribute vec2 aVertexPosition;
+  attribute vec2 aTextureCoord;
+
+  uniform mat3 projectionMatrix;
+
+  varying vec2 vTextureCoord;
+
+  void main(void){
+    gl_Position = vec4((projectionMatrix * vec3(aVertexPosition, 1.0)).xy, 0.0, 1.0);
+    vTextureCoord = aTextureCoord;
+  }
+`;
+
+const fragmentShaderSrc = `
+  precision mediump float;
+
+  varying vec2 vTextureCoord;
+  uniform sampler2D uSampler;
+  uniform sampler2D displacementMap;
+  uniform float strength;
+  uniform int viewMode;
+
+  void main(void) {
+    float depth = texture2D(displacementMap, vTextureCoord).r;
+    vec2 displacement = vec2(depth * strength, 0.0);
+
+    if (viewMode == 1) {  // Regular Stereo
+      vec2 displacedCoord = vTextureCoord + displacement;
+      gl_FragColor = texture2D(uSampler, displacedCoord);
+    } else if (viewMode == 2) {  // Anaglyph
+      vec2 leftCoord = vTextureCoord - displacement;
+      vec2 rightCoord = vTextureCoord + displacement;
+      vec4 leftColor = texture2D(uSampler, leftCoord);
+      vec4 rightColor = texture2D(uSampler, rightCoord);
+      gl_FragColor = vec4(leftColor.r, rightColor.g, rightColor.b, 1.0);
+    } else {
+      gl_FragColor = texture2D(uSampler, vTextureCoord);
+    }
+  }
+`;
+
+const StereoImage = ({ imageFile, depthMap }) => {
   const canvasRef = useRef(null);
-  const animationRef = useRef(null);
+  const [strength, setStrength] = useState(0.05);
+  const [viewMode, setViewMode] = useState(1); // 1: Regular, 2: Anaglyph
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const context = canvas.getContext('2d');
-    const image = new Image();
-    image.src = imageUrl;
+    if (!(imageFile instanceof Blob)) {
+      console.error("Invalid image file data", imageFile);
+      return;
+    }
 
-    const drawImage = (dx = 0, dy = 0) => {
-      context.clearRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, dx, dy, canvas.width, canvas.height);
+    const app = new PIXI.Application({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      autoStart: true,
+    });
+
+    console.log("PIXI application initialized:", app);
+
+    canvasRef.current.appendChild(app.view);
+    console.log("Canvas appended to DOM:", app.view);
+
+    const imageUrl = URL.createObjectURL(imageFile);
+
+    // Load image texture directly
+    const imageTexture = PIXI.Texture.from(imageUrl);
+
+    // Convert depth map to a texture
+    const depthMapCanvas = document.createElement('canvas');
+    const depthMapContext = depthMapCanvas.getContext('2d');
+    depthMapCanvas.width = depthMap.shape[1];
+    depthMapCanvas.height = depthMap.shape[0];
+    const depthImageData = depthMapContext.createImageData(depthMapCanvas.width, depthMapCanvas.height);
+
+    for (let i = 0; i < depthMap.depthArray.length; i++) {
+      const value = depthMap.depthArray[i] * 255;
+      depthImageData.data[i * 4] = value;       // Red
+      depthImageData.data[i * 4 + 1] = value;   // Green
+      depthImageData.data[i * 4 + 2] = value;   // Blue
+      depthImageData.data[i * 4 + 3] = 255;     // Alpha
+    }
+
+    depthMapContext.putImageData(depthImageData, 0, 0);
+    const depthMapTexture = PIXI.Texture.from(depthMapCanvas);
+
+    const uniforms = {
+      uSampler: imageTexture,
+      displacementMap: depthMapTexture,
+      strength: strength,
+      viewMode: viewMode,
     };
 
-    image.onload = () => {
-      drawImage();
+    const shader = new PIXI.Filter(vertexShaderSrc, fragmentShaderSrc, uniforms);
+    const sprite = new PIXI.Sprite(imageTexture);
+
+    sprite.width = app.screen.width;
+    sprite.height = app.screen.height;
+    sprite.filters = [shader];
+
+    app.stage.addChild(sprite);
+
+    // Update uniforms when state changes
+    const updateUniforms = () => {
+      shader.uniforms.strength = strength;
+      shader.uniforms.viewMode = viewMode;
+      console.log("Uniforms updated:", { strength, viewMode });
     };
 
-    const animate = () => {
-      const elapsedTime = (Date.now() % 2000) / 2000; // Loop every 2 seconds
-      const angle = elapsedTime * Math.PI * 2;
-      const dx = Math.sin(angle) * 20; // Dynamic X offset based on angle
-      const dy = Math.cos(angle) * 20; // Dynamic Y offset based on angle
-      drawImage(dx, dy);
-
-      animationRef.current = requestAnimationFrame(animate);
-    };
-
-    animationRef.current = requestAnimationFrame(animate);
-
-    const handleMouseMove = (e) => {
-      const rect = canvas.getBoundingClientRect();
-      const x = (e.clientX - rect.left) / rect.width;
-      const y = (e.clientY - rect.top) / rect.height;
-
-      const dx = (x - 0.5) * 40; // Dynamic X offset based on mouse position
-      const dy = (y - 0.5) * 40; // Dynamic Y offset based on mouse position
-      drawImage(dx, dy);
-    };
-
-    canvas.addEventListener('mousemove', handleMouseMove);
+    updateUniforms();
 
     return () => {
-      cancelAnimationFrame(animationRef.current);
-      canvas.removeEventListener('mousemove', handleMouseMove);
+      app.destroy(true, { children: true, texture: true, baseTexture: true });
+      console.log("PIXI application destroyed");
     };
-  }, [imageUrl, depthMap]);
+  }, [imageFile, depthMap, strength, viewMode]);
 
-  return <canvas ref={canvasRef} width="800" height="600" style={{ width: '100%', height: '100%' }} />;
+  const handleStrengthChange = (e) => {
+    setStrength(parseFloat(e.target.value));
+  };
+
+  const toggleViewMode = () => {
+    setViewMode(viewMode === 1 ? 2 : 1);
+  };
+
+  return (
+    <div>
+      <div ref={canvasRef} style={{ width: '100%', height: '100%' }} />
+      <div style={{ marginTop: '10px', textAlign: 'center' }}>
+        <label>
+          Strength:
+          <input
+            type="range"
+            min="0.01"
+            max="0.1"
+            step="0.01"
+            value={strength}
+            onChange={handleStrengthChange}
+            style={{ marginLeft: '10px' }}
+          />
+        </label>
+        <button onClick={toggleViewMode} style={{ marginLeft: '20px' }}>
+          Toggle View Mode
+        </button>
+      </div>
+    </div>
+  );
 };
 
 export default StereoImage;

@@ -1,151 +1,206 @@
 import React, { useEffect, useRef, useState } from 'react';
-import * as PIXI from 'pixi.js';
+import { fragmentShaderSrc } from '../shaders/Shaders';
 
 const vertexShaderSrc = `
-  attribute vec2 aVertexPosition;
-  attribute vec2 aTextureCoord;
-
-  uniform mat3 projectionMatrix;
-
-  varying vec2 vTextureCoord;
-
-  void main(void){
-    gl_Position = vec4((projectionMatrix * vec3(aVertexPosition, 1.0)).xy, 0.0, 1.0);
-    vTextureCoord = aTextureCoord;
-  }
-`;
-
-const fragmentShaderSrc = `
-  precision mediump float;
-
-  varying vec2 vTextureCoord;
-  uniform sampler2D uSampler;
-  uniform sampler2D displacementMap;
-  uniform float strength;
-  uniform int viewMode;
-
-  void main(void) {
-    float depth = texture2D(displacementMap, vTextureCoord).r;
-    vec2 displacement = vec2(depth * strength, 0.0);
-
-    if (viewMode == 1) {  // Regular Stereo
-      vec2 displacedCoord = vTextureCoord + displacement;
-      gl_FragColor = texture2D(uSampler, displacedCoord);
-    } else if (viewMode == 2) {  // Anaglyph
-      vec2 leftCoord = vTextureCoord - displacement;
-      vec2 rightCoord = vTextureCoord + displacement;
-      vec4 leftColor = texture2D(uSampler, leftCoord);
-      vec4 rightColor = texture2D(uSampler, rightCoord);
-      gl_FragColor = vec4(leftColor.r, rightColor.g, rightColor.b, 1.0);
-    } else {
-      gl_FragColor = texture2D(uSampler, vTextureCoord);
+    attribute vec2 a_position;
+    void main() {
+        gl_Position = vec4(a_position, 0.0, 1.0);
     }
-  }
 `;
 
 const StereoImage = ({ imageFile, depthMap }) => {
   const canvasRef = useRef(null);
-  const [strength, setStrength] = useState(0.05);
-  const [viewMode, setViewMode] = useState(1); // 1: Regular, 2: Anaglyph
+  const glRef = useRef(null);
+  const programRef = useRef(null);
+  const [state, setState] = useState({
+    depthHeight: 0.35,
+    depthFocus: 0.5,
+    depthZoom: 1.0,
+    depthIsometric: 0.0,
+    depthDolly: 0.0,
+    depthCenter: [0, 0],
+    depthOffset: [0, 0],
+    depthStatic: 0.25,
+    depthOrigin: [0, 0],
+    depthInvert: 0,
+    depthMirror: 1,
+    quality: 0.5,
+    dofEnable: 0,
+    dofIntensity: 1.0,
+    dofStart: 0.6,
+    dofEnd: 1.0,
+    dofExponent: 2.0,
+    dofQuality: 4,
+    dofDirections: 16,
+    vignetteEnable: 0,
+    vignetteIntensity: 30,
+    vignetteDecay: 0.1,
+  });
 
   useEffect(() => {
-    if (!(imageFile instanceof Blob)) {
-      console.error("Invalid image file data", imageFile);
+    const canvas = canvasRef.current;
+    const gl = canvas.getContext('webgl');
+    glRef.current = gl;
+
+    if (!gl) {
+      console.error('WebGL not supported');
       return;
     }
 
-    const app = new PIXI.Application({
-      width: window.innerWidth,
-      height: window.innerHeight,
-      autoStart: true,
-    });
-
-    console.log("PIXI application initialized:", app);
-
-    canvasRef.current.appendChild(app.view);
-    console.log("Canvas appended to DOM:", app.view);
-
-    const imageUrl = URL.createObjectURL(imageFile);
-
-    // Load image texture directly
-    const imageTexture = PIXI.Texture.from(imageUrl);
-
-    // Convert depth map to a texture
-    const depthMapCanvas = document.createElement('canvas');
-    const depthMapContext = depthMapCanvas.getContext('2d');
-    depthMapCanvas.width = depthMap.shape[1];
-    depthMapCanvas.height = depthMap.shape[0];
-    const depthImageData = depthMapContext.createImageData(depthMapCanvas.width, depthMapCanvas.height);
-
-    for (let i = 0; i < depthMap.depthArray.length; i++) {
-      const value = depthMap.depthArray[i] * 255;
-      depthImageData.data[i * 4] = value;       // Red
-      depthImageData.data[i * 4 + 1] = value;   // Green
-      depthImageData.data[i * 4 + 2] = value;   // Blue
-      depthImageData.data[i * 4 + 3] = 255;     // Alpha
+    const program = createShaderProgram(gl, vertexShaderSrc, fragmentShaderSrc);
+    if (!program) {
+      console.error('Failed to create shader program');
+      return;
     }
+    programRef.current = program;
 
-    depthMapContext.putImageData(depthImageData, 0, 0);
-    const depthMapTexture = PIXI.Texture.from(depthMapCanvas);
+    const positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    const positions = new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]);
+    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
 
-    const uniforms = {
-      uSampler: imageTexture,
-      displacementMap: depthMapTexture,
-      strength: strength,
-      viewMode: viewMode,
-    };
+    const positionAttributeLocation = gl.getAttribLocation(program, 'a_position');
+    gl.enableVertexAttribArray(positionAttributeLocation);
+    gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
 
-    const shader = new PIXI.Filter(vertexShaderSrc, fragmentShaderSrc, uniforms);
-    const sprite = new PIXI.Sprite(imageTexture);
+    loadImageAndDepthMap(gl, imageFile, depthMap);
 
-    sprite.width = app.screen.width;
-    sprite.height = app.screen.height;
-    sprite.filters = [shader];
-
-    app.stage.addChild(sprite);
-
-    // Update uniforms when state changes
-    const updateUniforms = () => {
-      shader.uniforms.strength = strength;
-      shader.uniforms.viewMode = viewMode;
-      console.log("Uniforms updated:", { strength, viewMode });
-    };
-
-    updateUniforms();
+    requestAnimationFrame(render);
 
     return () => {
-      app.destroy(true, { children: true, texture: true, baseTexture: true });
-      console.log("PIXI application destroyed");
+      gl.deleteProgram(program);
+      gl.deleteBuffer(positionBuffer);
     };
-  }, [imageFile, depthMap, strength, viewMode]);
+  }, [imageFile, depthMap]);
 
-  const handleStrengthChange = (e) => {
-    setStrength(parseFloat(e.target.value));
+  const createShaderProgram = (gl, vsSource, fsSource) => {
+    const vertexShader = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+    const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+    if (!vertexShader || !fragmentShader) {
+      return null;
+    }
+
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error('Unable to initialize the shader program:', gl.getProgramInfoLog(program));
+      return null;
+    }
+
+    return program;
   };
 
-  const toggleViewMode = () => {
-    setViewMode(viewMode === 1 ? 2 : 1);
+  const compileShader = (gl, type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error('An error occurred compiling the shaders:', gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+
+    return shader;
+  };
+
+  const loadImageAndDepthMap = (gl, imageFile, depthMap) => {
+    const imageTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
+
+    const image = new Image();
+    image.onload = () => {
+      gl.bindTexture(gl.TEXTURE_2D, imageTexture);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+      gl.generateMipmap(gl.TEXTURE_2D);
+    };
+    image.src = URL.createObjectURL(imageFile);
+
+    const depthTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, depthTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, depthMap.width, depthMap.height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, depthMap.data);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    const program = programRef.current;
+    gl.useProgram(program);
+    gl.uniform1i(gl.getUniformLocation(program, 'image'), 0);
+    gl.uniform1i(gl.getUniformLocation(program, 'depth'), 1);
+  };
+
+  const render = (time) => {
+    const gl = glRef.current;
+    const program = programRef.current;
+
+    if (!gl || !program) return;
+
+    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.useProgram(program);
+
+    gl.uniform2f(gl.getUniformLocation(program, 'iResolution'), gl.canvas.width, gl.canvas.height);
+    gl.uniform1f(gl.getUniformLocation(program, 'iTime'), time * 0.001);
+
+    Object.entries(state).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        gl.uniform2f(gl.getUniformLocation(program, `i${key[0].toUpperCase() + key.slice(1)}`), value[0], value[1]);
+      } else {
+        gl.uniform1f(gl.getUniformLocation(program, `i${key[0].toUpperCase() + key.slice(1)}`), value);
+      }
+    });
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    requestAnimationFrame(render);
+  };
+
+  const handleSliderChange = (key, value) => {
+    setState(prevState => ({
+      ...prevState,
+      [key]: parseFloat(value),
+    }));
+  };
+
+  const handleCheckboxChange = (key, checked) => {
+    setState(prevState => ({
+      ...prevState,
+      [key]: checked ? 1 : 0,
+    }));
   };
 
   return (
-    <div>
-      <div ref={canvasRef} style={{ width: '100%', height: '100%' }} />
-      <div style={{ marginTop: '10px', textAlign: 'center' }}>
-        <label>
-          Strength:
-          <input
-            type="range"
-            min="0.01"
-            max="0.1"
-            step="0.01"
-            value={strength}
-            onChange={handleStrengthChange}
-            style={{ marginLeft: '10px' }}
-          />
-        </label>
-        <button onClick={toggleViewMode} style={{ marginLeft: '20px' }}>
-          Toggle View Mode
-        </button>
+    <div style={{ width: '100%', height: '100%' }}>
+      <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }} />
+      <div style={{ position: 'absolute', top: 10, left: 10, color: 'white' }}>
+        {Object.entries(state).map(([key, value]) => (
+          <div key={key}>
+            <label>
+              {key}:
+              {typeof value === 'number' ? (
+                <input
+                  type="range"
+                  min="0"
+                  max={key.includes('Enable') ? "1" : "2"}
+                  step="0.01"
+                  value={value}
+                  onChange={(e) => handleSliderChange(key, e.target.value)}
+                />
+              ) : (
+                <input
+                  type="checkbox"
+                  checked={value === 1}
+                  onChange={(e) => handleCheckboxChange(key, e.target.checked)}
+                />
+              )}
+            </label>
+          </div>
+        ))}
       </div>
     </div>
   );
